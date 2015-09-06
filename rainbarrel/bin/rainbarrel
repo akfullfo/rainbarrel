@@ -17,11 +17,10 @@
 # ________________________________________________________________________
 #
  
-import os, sys, time, re, socket, struct, urlparse, json, argparse, logging
-import yaml
+import os, sys, time, re, argparse, logging, yaml
 from logging.handlers import SysLogHandler
-import xml.dom.minidom
-from taskforce import utils, poll, httpd
+from taskforce import utils
+from rainbarrel import barrel
  
 program = os.path.basename(os.path.splitext(sys.argv[0])[0])
 logging_name = program
@@ -29,10 +28,10 @@ logging_name = program
 def_config = {
 	'listen': '0.0.0.0',
 	'certfile': None,
-	'datadir': '~/rainbarrel',
-	'authaddrs': [],
+	'datadir': '~/barrel',
+	'authaddrs': None,
 }
-def_config['pidfile'] = os.path.join(def_config['datadir'], program + '.pid')
+def_pidfile = os.path.join(def_config['datadir'], program + '.pid')
 
 def load_config(path):
 	config = def_config.copy()
@@ -41,331 +40,6 @@ def load_config(path):
 			loaded_config = yaml.safe_load(f)
 		config.update(loaded_config)
 	return config
-
-def cidr2mask(addr):
-	mask = long(0)
-	addr = int(addr)
-	if addr > 32 or addr < 0:
-		return None
-	while addr < 32:
-		mask = (mask << 1) | 1
-		addr += 1
-	return ~mask & 0xFFFFFFFF
-
-def ip2int(addr):
-	try:
-		return struct.unpack("!L", socket.inet_aton(addr))[0]
-	except:
-		return None
-
-def iso8601(tim = time.time(), terse=False):
-	frac = int((tim - int(tim)) * 1000.0 + 0.5)
-	tim = int(tim)
-	if frac >= 1000:
-		#  Handle case where the fraction was >= 0.9995
-		tim += 1
-		frac = 0
-	utc = time.gmtime(tim)
-	if terse:
-		fmt = "%Y%m%dT%H%M%S."
-	else:
-		fmt = "%Y-%m-%dT%H:%M:%S."
-	return time.strftime(fmt, utc) + ('%03d' % (frac,)) + 'Z'
-
-class Barrel(object):
-
-	#  File in datadir used to record current state
-	#
-	statefile_name = 'rainbarrel.state'
-
-	#  Match valid hex numbers
-	#
-	is_hex = re.compile(r'^0x[0-9a-fA-F]+$')
-
-	#  This is the number of seconds between Jan 1, 1970 UTC (unix epoch) and
-	#  Jan 1, 2000 UTC (rainforest epoch).
-	#
-	#  Except the meter seems to actually be on local time, so subtract 6hrs
-	#
-	time_t_offset_2000 = 946706400 - 21600
-
-	#  Configuration information for each message type.
-	#
-	config = {
-		'InstantaneousDemand': {
-			'event_name': 'demand',
-			'desired_period': 30
-		},
-		'DeviceInfo': {
-		},
-		'NetworkInfo': {
-		},
-		'CurrentSummationDelivered': {
-			'event_name': 'summation',
-			'desired_period': 300
-		},
-		'PriceCluster': {
-			#'event_name': 'price',
-			#'desired_period': 60
-		},
-		'TimeCluster': {
-		},
-		'BlockPriceDetail': {
-		}
-	}
-
-	#  Don't trigger a period update if the delta is less than this
-	period_reset_tolerance = 5
-
-	#  Response tuple when no action is needed
-	#
-	noop_response = (200, '', 'text/plain')
-
-	set_schedule_template = """
-<RavenCommand>
-	<Name>set_schedule</Name>
-	<DeviceMacId>%s</DeviceMacId>
-	<Event>%s</Event>
-	<Frequency>0x%04x</Frequency>
-	<Enabled>Y</Enabled>
-</RavenCommand>
-"""
-	def __init__(self, **params):
-		self.log = params.get('log')
-		if not self.log:
-			self.log = logging.getLogger(__name__)
-			self.log.addHandler(logging.NullHandler())
-		self.datadir = os.path.expandvars(os.path.expanduser(params.get('datadir')))
-		if self.datadir:
-			if not os.access(self.datadir, os.W_OK | os.X_OK):
-				#  Throw this early because we don't actually attempt
-				#  access until a POST arrives.
-				#
-				raise Exception("Data directory '%s' is not writable" % (self.datadir))
-			self.statefile = os.path.join(self.datadir, self.statefile_name)
-			self.state = self.load_state()
-			self.recording = True
-		else:
-			self.statfile = None
-			self.state = {}
-			self.recording = False
-
-	def load_state(self):
-		if not self.statefile:
-			self.log.info("State file processing disabled")
-			return {}
-		try:
-			with open(self.statefile, 'r') as f:
-				prev_state = f.read()
-		except Exception as e:
-			self.log.warning("No previous state file '%s' -- %s", self.statefile, str(e))
-			return {}
-		try:
-			return json.loads(prev_state)
-		except Exception as e:
-			self.log.warning("Parse failed on previous state file '%s' -- %s", self.statefile, str(e))
-			return {}
-
-	def save_state(self):
-		if not self.statefile:
-			self.log.debug("State file processing disabled")
-			return
-		temp = self.statefile + '.tmp'
-		try:
-			with open(temp, 'w') as f:
-				f.write(json.dumps(self.state, indent=4))
-		except Exception as e:
-			self.log.error("Write failed to '%s' -- %s", temp, str(e))
-			return
-		try:
-			os.rename(temp, self.statefile)
-		except Exception as e:
-			self.log.error("Rename of '%s' to '%s' failed -- %s", temp, self.statefile, str(e))
-
-	def log_command(self, info, level=logging.DEBUG):
-		self.log.log(level, "%s ...", info['_name'])
-		for line in json.dumps(info, indent=4).splitlines():
-			self.log.log(level, "    %s", line)
-
-	def check_schedule(self, info):
-		name = info['_name']
-		config = self.config.get(name)
-		dev_mac = info['_raw']['DeviceMacId']
-		if not config:
-			self.log.debug("No config for '%s', skipping schedule check", name)
-			return self.noop_response
-		desired_period = config.get('desired_period')
-		if not desired_period:
-			self.log.warning("No desired period for '%s', skipping schedule check", name)
-			return self.noop_response
-		event_name = config.get('event_name')
-		if not event_name:
-			self.log.warning("No event name for '%s', skipping schedule check", name)
-			return self.noop_response
-		prev_info = self.state.get(name)
-		curr_ts = info['_timestamp']
-		if prev_info and '_timestamp' in prev_info and prev_info['_timestamp']:
-			prev_ts = prev_info['_timestamp']
-		else:
-			self.log.info("No previous timestamp for '%s', skipping schedule check", name)
-			return self.noop_response
-		delta = curr_ts - prev_ts
-		if abs(delta - desired_period) < self.period_reset_tolerance:
-			self.log.debug("Report delta %.1fs within tolerance for '%s', skipping schedule change", delta, event_name)
-			return self.noop_response
-		self.log.info("Delta of %.1fs for %s differs from desired %.0f, changing schedule",
-							delta, event_name, desired_period)
-		content = self.set_schedule_template % (dev_mac, event_name, desired_period)
-		for line in content.splitlines():
-			self.log.debug("%s", line.rstrip())
-		return (200, content, 'text/xml')
-
-	def read_meter(self, item, info):
-		name = info['_name']
-		sys_timestamp = info['_timestamp']
-
-		timestamp = info.get('TimeStamp')
-		value = info.get(item)
-		multiplier = info.get('Multiplier')
-		divisor = info.get('Divisor')
-		if value is None:
-			raise Exception("Missing '%s' in %s" % (item, name,))
-		if multiplier is None:
-			raise Exception("Missing 'Multiplier' in %s" % (name,))
-		if divisor is None:
-			raise Exception("Missing 'Divisor' in %s" % (name,))
-		result = float(value) * multiplier / divisor
-		try:
-			clock_delta = ', clock delta %.3fs' % (sys_timestamp - timestamp - self.time_t_offset_2000, )
-		except Exception as e:
-			self.log.warning("Could not convert TimeStamp %s to clock delta -- %s", repr(timestamp), str(e))
-			clock_delta = ''
-		self.log.debug("Result is %.3f kW%s", result, clock_delta)
-
-		return result
-
-	def record_data(self, tag, ts, value):
-		if not self.datadir:
-			return
-		iso_ts = iso8601(ts)
-		iso_date = iso_ts[:10]
-		self.log.debug("%s: %.3f", tag, value)
-		fname = os.path.join(self.datadir, iso_date + '.' + tag)
-
-		with open(fname, 'a') as f:
-			f.write("%s\t%.3f\n" % (iso_ts, value))
-
-	def process(self, path, postmap=None):
-		self.log.info("postmap: %s", repr(postmap))
-		if '=data' not in postmap:
-			self.log.error("Missing payload from device")
-			return
-		payload = postmap['=data']
-		try:
-			dom = xml.dom.minidom.parseString(payload)
-		except Exception as e:
-			self.log.error("Payload parse failed -- %s", str(e), exc_info=True)
-			self.log.error("Failed payload was ...")
-			if len(payload) > 1000:
-				payload = payload[:1000] + ' ...'
-			for line in str(payload).splitlines():
-				self.log.error("  ] %s", line)
-			return
-		self.log.debug("Payload parsed successfully ...")
-		for line in dom.toprettyxml(indent="  ").splitlines():
-			line = line.rstrip()
-			if line:
-				self.log.debug("  ] %s", line)
-
-		resp = (200, '', 'text/plain')
-
-		for node in dom.getElementsByTagName('rainforest'):
-			now = time.time()
-			header = {}
-			header['_version'] = node.getAttribute('version')
-			header['_mac'] = node.getAttribute('macId')
-			rainforest_timestamp = node.getAttribute('timestamp')
-			if rainforest_timestamp:
-				try:
-					header['_timestamp'] = int(rainforest_timestamp.strip('s'))
-					log.debug("Rainforest %s v%s timestamp delta %.3f",
-							header['_mac'], header['_version'], now - header['_timestamp'])
-				except Exception as e:
-					self.log.warning("Could not load Rainforest timestamp '%s' -- %s",
-												rainforest_timestamp, str(e))
-					header['_timestamp'] = None
-			else:
-				self.log.warning("No timestamp in rainforest POST xml")
-
-			if node.nodeType == node.ELEMENT_NODE and node.hasChildNodes():
-				for command in node.childNodes:
-					if command.nodeType != command.ELEMENT_NODE:
-						continue
-					if hasattr(self, command.nodeName) and callable(getattr(self, command.nodeName)):
-						self.log.debug("%s has command element '%s'", node.nodeName, command.nodeName)
-						info = {}
-						raw_info = {}
-						for elem in command.childNodes:
-							if elem.nodeType != elem.ELEMENT_NODE:
-								continue
-							tag = elem.nodeName
-							val = elem.childNodes[0].nodeValue.strip()
-							valstr = val
-							if self.is_hex.match(val):
-								try:
-									val = int(val, 0)
-									if val > 0x7FFFFFFF:
-										val -= 0x100000000
-								except:
-									pass
-							self.log.debug("%s %s = %s", command.nodeName, elem.nodeName, repr(val))
-							info[tag] = val
-							raw_info[tag] = valstr
-						info['_name'] = command.nodeName
-						info['_raw'] = raw_info
-						info['_timestamp'] = now
-
-						#  Run the per-message processing
-						#
-						getattr(self, command.nodeName)(info)
-
-						resp = self.check_schedule(info)
-
-						self.state[command.nodeName] = info
-
-					else:
-						self.log.info("%s has unknown element '%s'", node.nodeName, command.nodeName)
-			self.state['_timestamp'] = header['_timestamp']
-			for tag in ['_mac', '_version']:
-				if header[tag] != self.state.get(tag):
-					self.log.info("Rainforest %s value changed from %s to %s",
-										tag, repr(self.state.get(tag)), header[tag])
-					self.state[tag] = header[tag]
-			self.save_state()
-			return resp
-
-	def InstantaneousDemand(self, info):
-		self.log_command(info)
-		self.record_data('demand', info['_timestamp'], self.read_meter('Demand', info))
-
-	def DeviceInfo(self, info):
-		self.log_command(info)
-
-	def NetworkInfo(self, info):
-		self.log_command(info)
-
-	def PriceCluster(self, info):
-		self.log_command(info)
-
-	def CurrentSummationDelivered(self, info):
-		self.log_command(info)
-		self.record_data('summation', info['_timestamp'], self.read_meter('SummationDelivered', info))
-
-	def TimeCluster(self, info):
-		self.log_command(info)
-
-	def BlockPriceDetail(self, info):
-		self.log_command(info, level=logging.INFO)
 
 p = argparse.ArgumentParser(formatter_class=argparse.RawDescriptionHelpFormatter,
 	description='Track demand power from Rainforest "Eagle" smart meter monitoring device.')
@@ -376,7 +50,7 @@ p.add_argument('-e', '--log-stderr', action='store_true', dest='log_stderr', hel
 p.add_argument('-b', '--background', action='store_true', dest='daemonize', help='Run in the background.')
 p.add_argument('-c', '--config', action='store', dest='config_file', metavar='DIR', help='Configuration file')
 p.add_argument('-p', '--pidfile', action='store', dest='pidfile', metavar='FILE',
-			help='Pidfile path, default "%s", "-" means none.' %(def_config.get('pidfile'),))
+			help='Pidfile path, default "%s", "-" means none.' % (def_pidfile,))
 
 args = p.parse_args()
 
@@ -384,7 +58,7 @@ config = load_config(args.config_file)
 
 pidfile = None
 if args.pidfile is None and args.daemonize:
-	pidfile = config.get('pidfile')
+	pidfile = def_pidfile
 else:
 	pidfile = args.pidfile
 if pidfile == '' or pidfile == '-':
@@ -392,18 +66,6 @@ if pidfile == '' or pidfile == '-':
 
 if pidfile:
 	pidfile = os.path.realpath(os.path.expandvars(os.path.expanduser(pidfile)))
-
-authorized_addrs = None
-if config.get('authaddrs'):
-	authorized_addrs = []
-	for addr in config['authaddrs']:
-		f = addr.split('/', 1)
-		ip = f[0]
-		if len(f) > 1:
-			cidr = f[1]
-		else:
-			cidr = 32
-		authorized_addrs.append((ip2int(ip), cidr2mask(cidr)))
 
 if args.daemonize:
 	utils.daemonize()
@@ -440,31 +102,12 @@ if pidfile is not None:
 		log.critical('Fatal error -- %s', str(e), exc_info=args.verbose)
 		sys.exit(2)
 
-barrel = Barrel(log=log, datadir=config.get('datadir'))
-
-service = httpd.HttpService()
-service.listen = config['listen']
-service.certfile = config.get('certfile')
-if 'timeout' in config:
-	service.timeout = float(config['timeout'])
-httpd_server = httpd.server(service, log=log)
-httpd_server.register_post(r'/rest', barrel.process)
-
-pset = poll.poll()
-pset.register(httpd_server, poll.POLLIN)
+barrel = barrel.Barrel(config, log=log)
 
 code = 0
 while True:
 	try:
-		evlist = pset.poll()
-		if evlist:
-			for item, mask in evlist:
-				if item == httpd_server:
-					item.handle_request()
-				else:
-					raise Exception("Unknown poll item %s", repr(item))
-		else:
-			log.error("Timeout when none requested")
+		barrel.fill()
 	except KeyboardInterrupt:
 		log.info("Exiting on interrupt")
 		code = 1
