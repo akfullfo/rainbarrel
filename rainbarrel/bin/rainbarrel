@@ -29,7 +29,7 @@ logging_name = program
 def_config = {
 	'listen': '0.0.0.0',
 	'certfile': None,
-	'datadir': '~/talon',
+	'datadir': '~/rainbarrel',
 	'authaddrs': [],
 }
 def_config['pidfile'] = os.path.join(def_config['datadir'], program + '.pid')
@@ -72,11 +72,11 @@ def iso8601(tim = time.time(), terse=False):
 		fmt = "%Y-%m-%dT%H:%M:%S."
 	return time.strftime(fmt, utc) + ('%03d' % (frac,)) + 'Z'
 
-class Talon(object):
+class Barrel(object):
 
 	#  File in datadir used to record current state
 	#
-	statefile_name = 'talon.state'
+	statefile_name = 'rainbarrel.state'
 
 	#  Match valid hex numbers
 	#
@@ -440,7 +440,7 @@ if pidfile is not None:
 		log.critical('Fatal error -- %s', str(e), exc_info=args.verbose)
 		sys.exit(2)
 
-talon = Talon(log=log, datadir=config.get('datadir'))
+barrel = Barrel(log=log, datadir=config.get('datadir'))
 
 service = httpd.HttpService()
 service.listen = config['listen']
@@ -448,7 +448,7 @@ service.certfile = config.get('certfile')
 if 'timeout' in config:
 	service.timeout = float(config['timeout'])
 httpd_server = httpd.server(service, log=log)
-httpd_server.register_post(r'/rest', talon.process)
+httpd_server.register_post(r'/rest', barrel.process)
 
 pset = poll.poll()
 pset.register(httpd_server, poll.POLLIN)
