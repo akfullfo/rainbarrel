@@ -17,39 +17,11 @@
 # ________________________________________________________________________
 #
  
-import os, time, re, socket, struct, json, logging
+import os, time, re, socket, struct, json, logging, netaddr
 import xml.dom.minidom
+from datetime import datetime
+from dateutil import tz
 from taskforce import poll, httpd
-
-def cidr2mask(addr):
-	mask = long(0)
-	addr = int(addr)
-	if addr > 32 or addr < 0:
-		return None
-	while addr < 32:
-		mask = (mask << 1) | 1
-		addr += 1
-	return ~mask & 0xFFFFFFFF
-
-def ip2int(addr):
-	try:
-		return struct.unpack("!L", socket.inet_aton(addr))[0]
-	except:
-		return None
-
-def iso8601(tim = time.time(), terse=False):
-	frac = int((tim - int(tim)) * 1000.0 + 0.5)
-	tim = int(tim)
-	if frac >= 1000:
-		#  Handle case where the fraction was >= 0.9995
-		tim += 1
-		frac = 0
-	utc = time.gmtime(tim)
-	if terse:
-		fmt = "%Y%m%dT%H%M%S."
-	else:
-		fmt = "%Y-%m-%dT%H:%M:%S."
-	return time.strftime(fmt, utc) + ('%03d' % (frac,)) + 'Z'
 
 class Barrel(object):
 
@@ -130,17 +102,39 @@ class Barrel(object):
 			self.state = {}
 			self.recording = False
 
+		#  This is set by fill().
+		self.is_inet = None
+
 		self.authorized_addrs = None
 		if self.config.get('authaddrs') is not None:
 			self.authorized_addrs = []
 			for addr in self.config['authaddrs']:
-				f = addr.split('/', 1)
-				ip = f[0]
-				if len(f) > 1:
-					cidr = f[1]
-				else:
-					cidr = 32
-				self.authorized_addrs.append((ip2int(ip), cidr2mask(cidr)))
+				self.authorized_addrs.append(netaddr.IPNetwork(addr))
+
+	def iso8601(self, tim = time.time(), **params):
+		local = params.get('local', self.config.get('timestamp_local', True))
+		resolution = params.get('resolution', self.config.get('timestamp_resolution', 'msec'))
+		terse = params.get('terse', self.config.get('timestamp_terse', False))
+		if local:
+			dt = datetime.fromtimestamp(tim, tz.tzlocal())
+		else:
+			#  Set the utc timezone so we get tz-aware rather than naive
+			dt = datetime.fromtimestamp(tim, tz.tzutc())
+		if terse:
+			t = dt.strftime("%Y%m%dT%H%M%S")
+		else:
+			t = dt.strftime("%Y-%m-%dT%H:%M:%S")
+		if resolution.lower().startswith('ms'):
+			t += '.%03d' % (int((dt.microsecond + 0.5) / 1000), )
+		elif resolution.lower().startswith('us'):
+			t += '.%06d' % (dt.microsecond, )
+		tzs = dt.strftime("%z")
+		if terse:
+			if tzs == '+0000':
+				tzs = 'Z'
+		else:
+			tzs = tzs[:3] + ':' + tzs[3:]
+		return t + tzs
 
 	def load_state(self):
 		if not self.statefile:
@@ -239,19 +233,32 @@ class Barrel(object):
 	def record_data(self, tag, ts, value):
 		if not self.datadir:
 			return
-		iso_ts = iso8601(ts)
-		iso_date = iso_ts[:10]
+		iso_ts = self.iso8601(ts)
 		self.log.debug("%s: %.3f", tag, value)
-		fname = os.path.join(self.datadir, iso_date + '.' + tag)
+		fname = os.path.join(self.datadir, self.iso8601(ts, terse=False)[:10] + '.' + tag)
 
 		with open(fname, 'a') as f:
 			f.write("%s\t%.3f\n" % (iso_ts, value))
 
-	def process(self, path, postmap=None):
-		if '=data' not in postmap:
+	def process(self, path, postmap, **params):
+		if self.is_inet and self.authorized_addrs is not None and 'handler' not in params:
+			self.log.error("Missing handler - cannot validate client address")
+			return None
+		if 'data' not in params:
 			self.log.error("Missing payload from device")
-			return
-		payload = postmap['=data']
+			return None
+		if self.is_inet and self.authorized_addrs is not None:
+			client_ip = netaddr.IPAddress(params['handler'].client_address[0])
+			self.log.info("Checking client address %s", client_ip)
+			authorized = False
+			for net in self.authorized_addrs:
+				if client_ip in net:
+					authorized = True
+					break
+			if not authorized:
+				self.log.warning("Unauthorized access from client at %s", client_ip)
+				return None
+		payload = params['data']
 		try:
 			dom = xml.dom.minidom.parseString(payload)
 		except Exception as e:
@@ -370,6 +377,8 @@ class Barrel(object):
 			service.timeout = float(config['timeout'])
 		httpd_server = httpd.server(service, log=self.log)
 		httpd_server.register_post(r'/rest', self.process)
+
+		self.is_inet = (httpd_server.address_family in [socket.AF_INET, socket.AF_INET6])
 
 		pset = poll.poll()
 		pset.register(httpd_server, poll.POLLIN)

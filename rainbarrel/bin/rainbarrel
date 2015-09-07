@@ -29,7 +29,11 @@ def_config = {
 	'listen': '0.0.0.0',
 	'certfile': None,
 	'datadir': '~/barrel',
-	'authaddrs': None,
+	'authaddrs': ['127.0.0.1/8', '::1', '192.168.11.0/24', '192.168.122.0/24'],
+	#'authaddrs': None,
+	'timestamp_local': True,
+	'timestamp_resolution': 'msec',
+	'timestamp_terse': False,
 }
 def_pidfile = os.path.join(def_config['datadir'], program + '.pid')
 
@@ -93,14 +97,14 @@ elif args.quiet:
 else:
 	log.setLevel(logging.INFO)
 
-log.info("Listening on %s", config['listen'])
-
 if pidfile is not None:
 	try:
 		utils.pidclaim(pidfile)
 	except Exception as e:
 		log.critical('Fatal error -- %s', str(e), exc_info=args.verbose)
 		sys.exit(2)
+
+log.info("Started")
 
 barrel = barrel.Barrel(config, log=log)
 
