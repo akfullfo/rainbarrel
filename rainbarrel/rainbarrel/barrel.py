@@ -21,7 +21,7 @@ import os, time, re, socket, struct, json, logging, netaddr, importlib, inspect
 import xml.dom.minidom
 from datetime import datetime
 from dateutil import tz
-import plugin.plugin
+import plugin
 from taskforce import poll, httpd
 
 class Barrel(object):
@@ -398,7 +398,7 @@ class Barrel(object):
 	"""
 		plugins = []
 
-		plugin_subdir = 'plugin'
+		plugin_subdir = 'plugins'
 		plugin_dir = os.path.join(os.path.dirname(__file__), plugin_subdir)
 		candidates = []
 		try:
@@ -428,7 +428,7 @@ class Barrel(object):
 					obj_name = name + '.' + elem
 					try:
 						if inspect.isclass(obj):
-							if issubclass(obj, plugin.plugin.Plugin):
+							if issubclass(obj, plugin.Plugin):
 								plug = obj()
 								plugins.append((plug, obj_name))
 								self.log.info("Instantiated plugin class %s()", obj_name)
