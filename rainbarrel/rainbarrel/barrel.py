@@ -351,7 +351,7 @@ class Barrel(object):
 					self.state[tag] = header[tag]
 		for plugin, name in self.plugins:
 			try:
-				self.log.info("Running plugin '%s' for command '%s'", name, self.state['_last_updated'])
+				self.log.debug("Running plugin '%s' for command '%s'", name, self.state['_last_updated'])
 				plugin.handle(self)
 			except Exception as e:
 				self.log.error("Plugin '%s' failed for '%s' -- %s",
