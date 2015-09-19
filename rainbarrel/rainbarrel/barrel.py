@@ -17,10 +17,11 @@
 # ________________________________________________________________________
 #
  
-import os, time, re, socket, struct, json, logging, netaddr
+import os, time, re, socket, struct, json, logging, netaddr, importlib, inspect
 import xml.dom.minidom
 from datetime import datetime
 from dateutil import tz
+import plugin.plugin
 from taskforce import poll, httpd
 
 class Barrel(object):
@@ -47,22 +48,15 @@ class Barrel(object):
 			'event_name': 'demand',
 			'desired_period': 30
 		},
-		'DeviceInfo': {
-		},
-		'NetworkInfo': {
-		},
 		'CurrentSummationDelivered': {
 			'event_name': 'summation',
 			'desired_period': 300
 		},
-		'PriceCluster': {
-			#'event_name': 'price',
-			#'desired_period': 60
-		},
-		'TimeCluster': {
-		},
-		'BlockPriceDetail': {
-		}
+		'DeviceInfo': { },
+		'NetworkInfo': { },
+		'PriceCluster': { },
+		'TimeCluster': { },
+		'BlockPriceDetail': { }
 	}
 
 	#  Don't trigger a period update if the delta is less than this
@@ -110,6 +104,8 @@ class Barrel(object):
 			self.authorized_addrs = []
 			for addr in self.config['authaddrs']:
 				self.authorized_addrs.append(netaddr.IPNetwork(addr))
+
+		self.plugins = self._import_plugins()
 
 	def iso8601(self, tim = time.time(), **params):
 		local = params.get('local', self.config.get('timestamp_local', True))
@@ -176,10 +172,10 @@ class Barrel(object):
 	def check_schedule(self, info):
 		name = info['_name']
 		props = self.properties.get(name)
-		dev_mac = info['_raw']['DeviceMacId']
 		if not props:
 			self.log.debug("No properties for '%s', skipping schedule check", name)
 			return self.noop_response
+		dev_mac = info['_raw']['DeviceMacId']
 		desired_period = props.get('desired_period')
 		if not desired_period:
 			self.log.warning("No desired period for '%s', skipping schedule check", name)
@@ -207,6 +203,11 @@ class Barrel(object):
 		return (200, content, 'text/xml')
 
 	def read_meter(self, item, info):
+		"""
+		Returns a float value based on value, multiplier, and divisor int values,
+		as is received from the device for items such as Demand (in kW) or
+		SummationDelivered (in kWh).
+	"""
 		name = info['_name']
 		sys_timestamp = info['_timestamp']
 
@@ -226,21 +227,36 @@ class Barrel(object):
 		except Exception as e:
 			self.log.warning("Could not convert TimeStamp %s to clock delta -- %s", repr(timestamp), str(e))
 			clock_delta = ''
-		self.log.debug("Result is %.3f kW%s", result, clock_delta)
 
+		#  Best I can tell, we just have to know the units, the device doesn't indicate them.
+		#
+		self.log.debug("Result is %.3f %s%s",
+					result, 'kWh' if item == 'SummationDelivered' else 'kW', clock_delta)
 		return result
 
-	def record_data(self, tag, ts, value):
-		if not self.datadir:
-			return
-		iso_ts = self.iso8601(ts)
-		self.log.debug("%s: %.3f", tag, value)
-		fname = os.path.join(self.datadir, self.iso8601(ts, terse=False)[:10] + '.' + tag)
-
-		with open(fname, 'a') as f:
-			f.write("%s\t%.3f\n" % (iso_ts, value))
-
 	def process(self, path, postmap, **params):
+		"""
+		Receives all POSTs from device via taskforce.httpd module.
+		This queues updates to listening processes and runs each
+		plugin synchonously in order.  Both plugins and processes
+		receive the same data. Plugins are passed the data as a dict.
+		Processes receive it as netstring-encapsulated JSON (see
+		https://en.wikipedia.org/wiki/Netstring).
+
+		The data sent consists of the complete state from the device for all
+		known message types.  A top-level tag '_last_updated' points at the
+		name of the last element that changed, triggering the event.
+
+		Because each event is handled synchronously, all recipients will
+		receive all changes in order.  Exceptions to this are:
+
+		-  A maximum number of pending changes is kept for each process
+		   so a process that stalls for some period may lose data.
+
+		-  A write error on a process socket causes all the data to be flushed
+		   and the connection dropped.	The process will receive the current
+		   state when it next connects.
+	"""
 		if self.is_inet and self.authorized_addrs is not None and 'handler' not in params:
 			self.log.error("Missing handler - cannot validate client address")
 			return None
@@ -295,75 +311,53 @@ class Barrel(object):
 			else:
 				self.log.warning("No timestamp in rainforest POST xml")
 
-			if node.nodeType == node.ELEMENT_NODE and node.hasChildNodes():
-				for command in node.childNodes:
-					if command.nodeType != command.ELEMENT_NODE:
+			if node.nodeType != node.ELEMENT_NODE or not node.hasChildNodes():
+				self.log.warning("XML rainforest node had not children")
+				continue
+			for command in node.childNodes:
+				if command.nodeType != command.ELEMENT_NODE:
+					continue
+				self.log.debug("XML item '%s' has command element '%s'", node.nodeName, command.nodeName)
+				info = {}
+				raw_info = {}
+				for elem in command.childNodes:
+					if elem.nodeType != elem.ELEMENT_NODE:
 						continue
-					if hasattr(self, command.nodeName) and callable(getattr(self, command.nodeName)):
-						self.log.debug("%s has command element '%s'", node.nodeName, command.nodeName)
-						info = {}
-						raw_info = {}
-						for elem in command.childNodes:
-							if elem.nodeType != elem.ELEMENT_NODE:
-								continue
-							tag = elem.nodeName
-							val = elem.childNodes[0].nodeValue.strip()
-							valstr = val
-							if self.is_hex.match(val):
-								try:
-									val = int(val, 0)
-									if val > 0x7FFFFFFF:
-										val -= 0x100000000
-								except:
-									pass
-							self.log.debug("%s %s = %s", command.nodeName, elem.nodeName, repr(val))
-							info[tag] = val
-							raw_info[tag] = valstr
-						info['_name'] = command.nodeName
-						info['_raw'] = raw_info
-						info['_timestamp'] = now
+					tag = elem.nodeName
+					val = elem.childNodes[0].nodeValue.strip()
+					valstr = val
+					if self.is_hex.match(val):
+						try:
+							val = int(val, 0)
+							if val > 0x7FFFFFFF:
+								val -= 0x100000000
+						except:
+							pass
+					self.log.debug("%s %s = %s", command.nodeName, elem.nodeName, repr(val))
+					info[tag] = val
+					raw_info[tag] = valstr
+				info['_name'] = command.nodeName
+				info['_raw'] = raw_info
+				info['_timestamp'] = now
+				resp = self.check_schedule(info)
+				self.state[command.nodeName] = info
+				self.state['_last_updated'] = command.nodeName
 
-						#  Run the per-message processing
-						#
-						getattr(self, command.nodeName)(info)
-
-						resp = self.check_schedule(info)
-
-						self.state[command.nodeName] = info
-
-					else:
-						self.log.info("%s has unknown element '%s'", node.nodeName, command.nodeName)
 			self.state['_timestamp'] = header['_timestamp']
 			for tag in ['_mac', '_version']:
 				if header[tag] != self.state.get(tag):
 					self.log.info("Rainforest %s value changed from %s to %s",
 										tag, repr(self.state.get(tag)), header[tag])
 					self.state[tag] = header[tag]
-			self.save_state()
-			return resp
-
-	def InstantaneousDemand(self, info):
-		self.log_command(info)
-		self.record_data('demand', info['_timestamp'], self.read_meter('Demand', info))
-
-	def DeviceInfo(self, info):
-		self.log_command(info)
-
-	def NetworkInfo(self, info):
-		self.log_command(info)
-
-	def PriceCluster(self, info):
-		self.log_command(info)
-
-	def CurrentSummationDelivered(self, info):
-		self.log_command(info)
-		self.record_data('summation', info['_timestamp'], self.read_meter('SummationDelivered', info))
-
-	def TimeCluster(self, info):
-		self.log_command(info)
-
-	def BlockPriceDetail(self, info):
-		self.log_command(info, level=logging.INFO)
+		for plugin, name in self.plugins:
+			try:
+				self.log.info("Running plugin '%s' for command '%s'", name, self.state['_last_updated'])
+				plugin.handle(self)
+			except Exception as e:
+				self.log.error("Plugin '%s' failed for '%s' -- %s",
+							name, self.state['_last_updated'], str(e), exc_info=True)
+		self.save_state()
+		return resp
 
 	def fill(self):
 		"""
@@ -393,3 +387,53 @@ class Barrel(object):
 						raise Exception("Unknown poll item %s", repr(item))
 			else:
 				raise Exception("Timeout when none requested")
+
+	def _import_plugins(self):
+		"""
+		Load any plugins that can be found.
+
+		For now, just look for plugins in the "plugin" subdir of the
+		module's dir.  May want to ultimately have a "BARREL_PLUGIN_PATH"
+		configuration.
+	"""
+		plugins = []
+
+		plugin_subdir = 'plugin'
+		plugin_dir = os.path.join(os.path.dirname(__file__), plugin_subdir)
+		candidates = []
+		try:
+			for fname in os.listdir(plugin_dir):
+				path = os.path.join(plugin_dir, fname)
+				if os.path.isfile(path):
+					name, ext = os.path.splitext(fname)
+					if ext not in set(['.py', '.pyc', '.pyo']):
+						self.log.debug("Ignoring non-python file '%s' for plugin", path)
+						continue
+					module_name = 'rainbarrel.' + plugin_subdir + '.' + name
+					if module_name in candidates:
+						self.log.debug("Plugin module '%s' already known", module_name)
+					else:
+						self.log.debug("Adding plugin module candidate '%s'", module_name)
+						candidates.append(module_name)
+		except Exception as e:
+			self.log.debug("Scan of plugin dir '%s' failed -- %s", dir, str(e))
+		for name in candidates:
+			try:
+				m = importlib.import_module(name)
+				self.log.debug("Loaded module '%s'", name)
+				for elem, obj in inspect.getmembers(m):
+					if elem == 'Plugin':
+						#  Ignore the abstract class
+						continue
+					obj_name = name + '.' + elem
+					try:
+						if inspect.isclass(obj):
+							if issubclass(obj, plugin.plugin.Plugin):
+								plug = obj()
+								plugins.append((plug, obj_name))
+								self.log.info("Instantiated plugin class %s()", obj_name)
+					except Exception as e:
+						self.log.warning("Class instantiation of '%s' failed -- %s", name, str(e))
+			except Exception as e:
+				self.log.warning("Module load of '%s' failed -- %s", name, str(e))
+		return plugins
