@@ -1,9 +1,10 @@
 #!/usr/bin/env python
 
 import re, sys, os
+from setuptools import setup
 
 name = 'rainbarrel'
-version_file = os.path.joun(name, '__init__.py')
+version_file = os.path.join(name, '__init__.py')
 readme_file = 'README.md'
 version = ''
 with open(version_file, 'rt') as f:
@@ -20,7 +21,7 @@ setup_parms = {
 	'provides': [name],
 	'version': version,
 	'description': """Rainbarrel receives webhook POSTs from a Rainbow Eagle smart meter monitoring unit.
-The data ireceived is provided to plugins or external programs for data logging and control."""
+The data ireceived is provided to plugins or external programs for data logging and control.""",
 	'author': "Andrew Fullford",
 	'author_email': "git042013@fullford.com",
 	'maintainer': "Andrew Fullford",
