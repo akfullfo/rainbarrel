@@ -52,7 +52,7 @@ p.add_argument('-v', '--verbose', action='store_true', dest='verbose', help='Ver
 p.add_argument('-q', '--quiet', action='store_true', dest='quiet', help='Quiet logging, warnings and errors only.')
 p.add_argument('-e', '--log-stderr', action='store_true', dest='log_stderr', help='Log to stderr instead of syslog.')
 p.add_argument('-b', '--background', action='store_true', dest='daemonize', help='Run in the background.')
-p.add_argument('-c', '--config', action='store', dest='config_file', metavar='DIR', help='Configuration file')
+p.add_argument('-c', '--config', action='store', dest='config_file', metavar='FILE', help='Configuration file')
 p.add_argument('-p', '--pidfile', action='store', dest='pidfile', metavar='FILE',
 			help='Pidfile path, default "%s", "-" means none.' % (def_pidfile,))
 
