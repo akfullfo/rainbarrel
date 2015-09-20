@@ -400,6 +400,7 @@ class Barrel(object):
 
 		plugin_subdir = 'plugins'
 		plugin_dir = os.path.join(os.path.dirname(__file__), plugin_subdir)
+		self.log.debug("Scanning plugin dir '%s'", plugin_dir)
 		candidates = []
 		try:
 			for fname in os.listdir(plugin_dir):
@@ -417,6 +418,7 @@ class Barrel(object):
 						candidates.append(module_name)
 		except Exception as e:
 			self.log.debug("Scan of plugin dir '%s' failed -- %s", dir, str(e))
+		self.log.debug("Plugin candidates: %s", candidates)
 		for name in candidates:
 			try:
 				m = importlib.import_module(name)
