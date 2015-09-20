@@ -265,7 +265,7 @@ class Barrel(object):
 			return None
 		if self.is_inet and self.authorized_addrs is not None:
 			client_ip = netaddr.IPAddress(params['handler'].client_address[0])
-			self.log.info("Checking client address %s", client_ip)
+			self.log.debug("Checking client address %s", client_ip)
 			authorized = False
 			for net in self.authorized_addrs:
 				if client_ip in net:
