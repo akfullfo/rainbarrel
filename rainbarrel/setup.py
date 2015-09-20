@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 import re, sys, os
-from setuptools import setup
+from setuptools import setup, find_packages
 
 name = 'rainbarrel'
 version_file = os.path.join(name, '__init__.py')
@@ -48,7 +48,7 @@ The data ireceived is provided to plugins or external programs for data logging 
 		'Topic :: Utilities'
 	],
 
-	'packages': [name],
+	'packages': [name, name + '.plugins'],
 	'scripts': [os.path.join('bin', name)],
 	'requires': [re.sub(r'\W.*', '', item) for item in requires],
 	'install_requires': requires
