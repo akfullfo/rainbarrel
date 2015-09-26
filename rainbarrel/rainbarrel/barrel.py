@@ -111,11 +111,20 @@ class Barrel(object):
 		local = params.get('local', self.config.get('timestamp_local', True))
 		resolution = params.get('resolution', self.config.get('timestamp_resolution', 'msec'))
 		terse = params.get('terse', self.config.get('timestamp_terse', False))
-		if local:
-			dt = datetime.fromtimestamp(tim, tz.tzlocal())
+		if isinstance(tim, datetime):
+			if tim.tzinfo is None or tim.tzinfo.utcoffset(tim) is None:
+				if local:
+					dt = tim.replace(tzinfo=tz.tzlocal())
+				else:
+					dt = tim.replace(tzinfo=tz.tzutc())
+			else:
+				dt = tim
 		else:
-			#  Set the utc timezone so we get tz-aware rather than naive
-			dt = datetime.fromtimestamp(tim, tz.tzutc())
+			if local:
+				dt = datetime.fromtimestamp(tim, tz.tzlocal())
+			else:
+				#  Set the utc timezone so we get tz-aware rather than naive
+				dt = datetime.fromtimestamp(tim, tz.tzutc())
 		if terse:
 			t = dt.strftime("%Y%m%dT%H%M%S")
 		else:
