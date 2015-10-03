@@ -243,6 +243,26 @@ class Barrel(object):
 					result, 'kWh' if item == 'SummationDelivered' else 'kW', clock_delta)
 		return result
 
+	def snapshot(self, path, postmap=None, **params):
+		"""
+		Returns a json-formatted snapshot of the current state.
+	"""
+		q = httpd.merge_query(path, postmap)
+		if 'fmt' in q:
+			fmt = q['fmt'][0]
+		else:
+			fmt = 'json'
+		fmt = fmt.lower()
+
+		if fmt == 'json':
+			json_params = {}
+			try: json_params['indent'] = int(q.get('indent')[0])
+			except: pass
+
+			return (200, json.dumps(self.state, indent=4), 'application/json')
+		else:
+			return (415, 'Invalid fmt request "%s"' % (fmt,), 'text/plain')
+
 	def process(self, path, postmap, **params):
 		"""
 		Receives all POSTs from device via taskforce.httpd module.
@@ -380,6 +400,7 @@ class Barrel(object):
 			service.timeout = float(config['timeout'])
 		httpd_server = httpd.server(service, log=self.log)
 		httpd_server.register_post(r'/rest', self.process)
+		httpd_server.register_get(r'/snap', self.snapshot)
 
 		self.is_inet = (httpd_server.address_family in [socket.AF_INET, socket.AF_INET6])
 
