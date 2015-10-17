@@ -27,9 +27,10 @@ logging_name = program
 
 def_config = {
 	'listen': '0.0.0.0',
+	'authaddrs': ['127.0.0.1/8', '::1', '192.168.11.0/24', '192.168.122.0/24'],
+	'events': '0.0.0.0:1315',
 	'certfile': None,
 	'datadir': '~/barrel',
-	'authaddrs': ['127.0.0.1/8', '::1', '192.168.11.0/24', '192.168.122.0/24'],
 	#'authaddrs': None,
 	'timestamp_local': True,
 	'timestamp_resolution': 'msec',
