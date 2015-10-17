@@ -39,7 +39,7 @@ class Plugin(object):
 
 		Generally, the most useful attribute of the parent is parent.state
 		which is a dict of the currently recorded state.  This includes a
-		"_last_updated" element which indicates the subject area of the POST
+		"_last_element" element which indicates the subject area of the POST
 		that triggered the change.
 
 		Plugins can make use of methods in the parent.  In particular,

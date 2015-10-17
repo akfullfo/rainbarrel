@@ -33,9 +33,9 @@ def record_data(barrel, tag, ts, value):
 
 class demand(Plugin):
 	def handle(self, barrel, **params):
-		last_updated_name = barrel.state.get('_last_updated')
+		last_updated_name = barrel.state.get('_last_element')
 		if not last_updated_name:
-			raise PluginError("No _last_updated element in state")
+			raise PluginError("No _last_element element in state")
 		if last_updated_name == 'InstantaneousDemand':
 			info = barrel.state.get(last_updated_name)
 			if not info:
@@ -46,9 +46,9 @@ class demand(Plugin):
 
 class summation(Plugin):
 	def handle(self, barrel, **params):
-		last_updated_name = barrel.state.get('_last_updated')
+		last_updated_name = barrel.state.get('_last_element')
 		if not last_updated_name:
-			raise PluginError("No _last_updated element in state")
+			raise PluginError("No _last_element element in state")
 		if last_updated_name == 'CurrentSummationDelivered':
 			info = barrel.state.get(last_updated_name)
 			if not info:

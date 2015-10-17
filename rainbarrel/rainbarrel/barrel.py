@@ -22,7 +22,13 @@ import xml.dom.minidom
 from datetime import datetime
 from dateutil import tz
 import plugin
+import event
 from taskforce import poll, httpd
+
+def_events_port = 1315
+
+#  Polling timeout in milliseconds
+poll_timeout = 3000
 
 class Barrel(object):
 
@@ -273,7 +279,7 @@ class Barrel(object):
 		https://en.wikipedia.org/wiki/Netstring).
 
 		The data sent consists of the complete state from the device for all
-		known message types.  A top-level tag '_last_updated' points at the
+		known message types.  A top-level tag '_last_element' points at the
 		name of the last element that changed, triggering the event.
 
 		Because each event is handled synchronously, all recipients will
@@ -370,7 +376,8 @@ class Barrel(object):
 				info['_timestamp'] = now
 				resp = self.check_schedule(info)
 				self.state[command.nodeName] = info
-				self.state['_last_updated'] = command.nodeName
+				self.state['_last_element'] = command.nodeName
+				self.state['_last_update'] = now
 
 			self.state['_timestamp'] = header['_timestamp']
 			for tag in ['_mac', '_version']:
@@ -380,13 +387,33 @@ class Barrel(object):
 					self.state[tag] = header[tag]
 		for plugin, name in self.plugins:
 			try:
-				self.log.debug("Running plugin '%s' for command '%s'", name, self.state['_last_updated'])
+				self.log.debug("Running plugin '%s' for command '%s'", name, self.state['_last_element'])
 				plugin.handle(self)
 			except Exception as e:
 				self.log.error("Plugin '%s' failed for '%s' -- %s",
-							name, self.state['_last_updated'], str(e), exc_info=True)
+							name, self.state['_last_element'], str(e), exc_info=True)
 		self.save_state()
 		return resp
+
+	def event_listener(self, addr, proto=socket.AF_INET, queue=5):
+		host = None
+		port = None
+		if addr.find(':') >= 0:
+			host, portstr = addr.rsplit(':', 1)
+			port = int(portstr)
+		else:
+			host = addr
+		if not host:
+			raise Exception("Invalid event listener address '%s'" % (addr,))
+		if not port:
+			port = def_events_port
+
+		sock = socket.socket(proto)
+		sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+		sock.bind((host, port))
+		sock.listen(queue)
+
+		return sock
 
 	def fill(self):
 		"""
@@ -397,7 +424,7 @@ class Barrel(object):
 		service.listen = self.config['listen']
 		service.certfile = self.config.get('certfile')
 		if 'timeout' in self.config:
-			service.timeout = float(config['timeout'])
+			service.timeout = float(self.config['timeout'])
 		httpd_server = httpd.server(service, log=self.log)
 		httpd_server.register_post(r'/rest', self.process)
 		httpd_server.register_get(r'/snap', self.snapshot)
@@ -407,16 +434,55 @@ class Barrel(object):
 		pset = poll.poll()
 		pset.register(httpd_server, poll.POLLIN)
 
-		while True:
-			evlist = pset.poll()
-			if evlist:
-				for item, mask in evlist:
-					if item == httpd_server:
-						item.handle_request()
+		#  Event handling has to be processed via poll because sockets are
+		#  long-running and have to interact with content in the master.
+		#  In this case, a socketserver instance in threaded or multiprocess
+		#  mode is awkward.
+		#
+		if 'events' in self.config:
+			event_listen = self.event_listener(self.config['events'])
+			pset.register(event_listen, poll.POLLIN)
+		else:
+			event_listen = None
+
+		try:
+			with event.EventSet(pset, event_listen) as es:
+				last_timestamp = None
+				while True:
+					evlist = pset.poll(poll_timeout)
+					if evlist:
+						for item, mask in evlist:
+							if item == httpd_server:
+								item.handle_request()
+							elif item == event_listen:
+								es.add()
+							elif isinstance(item, event.Event):
+								item.handle(mask)
+							else:
+								raise Exception("Unknown poll item %s", repr(item))
+
+						# After each event report any state change to the filters.
+						#
+						timestamp = self.state.get('_last_update')
+						if timestamp != last_timestamp:
+							last_timestamp = timestamp
+							es.filter(self.state)
+						else:
+							self.log.debug("Timestamp %s unchanged", timestamp)
 					else:
-						raise Exception("Unknown poll item %s", repr(item))
-			else:
-				raise Exception("Timeout when none requested")
+						self.log.debug("Idle")
+						es.idle()
+		except Exception as e:
+			self.log.error("Unexpected event -- %s", str(e), exc_info=True)
+		finally:
+			if event_listen:
+				try: event_listen.close()
+				except: pass
+				event_listen = None
+			try:
+				httpd_server.close()
+			except Exception as e:
+				self.log.warning("Error closing htto server -- %s", str(e))
 
 	def _import_plugins(self):
 		"""
