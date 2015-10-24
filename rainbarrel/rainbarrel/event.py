@@ -19,6 +19,7 @@
  
 import os, time, errno, socket, json, logging
 import event
+import netjson
 from taskforce import poll
 
 #  How long a fresh connection will be retained waiting for a
@@ -33,8 +34,7 @@ max_discard_wait = 5
 
 class Event(object):
 	"""
-	Handles event communication.  All messages are netstring-encapsulated
-	JSON text.  See https://en.wikipedia.org/wiki/Netstring.
+	Handles event communication.
 
 	Event processing is established when a client connects to the event
 	socket and sends a registration message indicating which events
@@ -55,7 +55,10 @@ class Event(object):
 		self.registration_timeout = self.connection_time + max_registration_wait
 		self.shutting_down = None
 		self.discard = None
+		self.filter_list = None
 		self.event_set._pset.register(self, poll.POLLIN)
+		self.reader = netjson.Reader(self.sock, log=self.log)
+		self.writer = netjson.Writer(self.sock, log=self.log)
 
 	def fileno(self):
 		return self.sock.fileno()
@@ -65,8 +68,11 @@ class Event(object):
 		Performs any housekeeping needed for the Event instance.
 	"""
 		if self.discard and time.time() > self.discard:
-			self.log.waring("Connection from %s exheeded shutdown wait, closing immediately", repr(self.client))
+			self.log.waring("Connection from %s exceeded shutdown wait, closing immediately", repr(self.client))
 			self.close()
+		if self.filter_list is not None:
+			self.log.debug("Connection from %s idle", repr(self.client))
+			return
 		if self.registration_timeout and time.time() > self.registration_timeout:
 			self.log.warning("Connection from %s expired before registration was received", repr(self.client))
 			self.shutdown()
@@ -113,12 +119,23 @@ class Event(object):
 	"""
 		self.log.info("Handle called")
 		if mask & poll.POLLIN:
-			data = self.sock.recv(4096)
-			if data == '':
+			items = 0
+			for item in self.reader.recv():
+				items += 1
+				self.log.info("Received %s", repr(item))
+				self.filter_list = item
+			self.log.info("Received %d item%s in this batch", items, '' if items == 1 else 's')
+			if self.reader.connection_lost:
 				self.log.info("EOF on %s connection", repr(self.client))
 				self.close()
-			else:
-				self.log.info("Received %d bytes from %s", len(data), repr(self.client))
+			if items > 0:
+				self.writer.queue(item)
+				self.event_set._pset.modify(self, poll.POLLIN|poll.POLLOUT)
+
+		if mask & poll.POLLOUT:
+			self.writer.send()
+			if self.writer.queue() == 0:
+				self.event_set._pset.modify(self, poll.POLLIN)
 
 	def filter(self, state):
 		"""
