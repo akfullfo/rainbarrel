@@ -52,11 +52,15 @@ class Barrel(object):
 	properties = {
 		'InstantaneousDemand': {
 			'event_name': 'demand',
-			'desired_period': 30
+			'desired_period': 30,
+			'readings': ['Demand'],
+			'units': 'kW'
 		},
 		'CurrentSummationDelivered': {
 			'event_name': 'summation',
-			'desired_period': 300
+			'desired_period': 300,
+			'readings': ['SummationDelivered', 'SummationReceived'],
+			'units': 'kWh'
 		},
 		'DeviceInfo': { },
 		'NetworkInfo': { },
@@ -355,6 +359,7 @@ class Barrel(object):
 				self.log.debug("XML item '%s' has command element '%s'", node.nodeName, command.nodeName)
 				info = {}
 				raw_info = {}
+				props = self.properties.get(command.nodeName, {})
 				for elem in command.childNodes:
 					if elem.nodeType != elem.ELEMENT_NODE:
 						continue
@@ -374,6 +379,13 @@ class Barrel(object):
 				info['_name'] = command.nodeName
 				info['_raw'] = raw_info
 				info['_timestamp'] = now
+				vals = {}
+				for reading in props.get('readings', []):
+					vals[reading] = self.read_meter(reading, info)
+				if 'units' in props:
+					vals['_units'] = props['units']
+				if len(vals) > 0:
+					info['_readings'] = vals
 				resp = self.check_schedule(info)
 				self.state[command.nodeName] = info
 				self.state['_last_element'] = command.nodeName
