@@ -1,8 +1,15 @@
 Changelog
 =========
 
+0.0.2 (2015-11-21)
+------------------
+
+- Add simple readme for pypi. [Andrew Fullford]
+
 0.0.1 (2015-11-21)
 ------------------
+
+- Release 0.0.1. [Andrew Fullford]
 
 - Pypi intro. [Andrew Fullford]
 
