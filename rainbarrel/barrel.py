@@ -469,7 +469,7 @@ class Barrel(object):
 							elif item == event_listen:
 								es.add()
 							elif isinstance(item, event.Event):
-								item.handle(mask)
+								item.handle(mask, self.state)
 							else:
 								raise Exception("Unknown poll item %s", repr(item))
 
