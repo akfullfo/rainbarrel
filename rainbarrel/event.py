@@ -17,7 +17,7 @@
 # ________________________________________________________________________
 #
  
-import os, time, errno, socket, json, logging
+import os, time, errno, socket, json, re, logging
 import event
 import netjson
 from taskforce import poll
@@ -32,17 +32,78 @@ max_registration_wait = 5
 #
 max_discard_wait = 5
 
+#  The operators supported for use in filters
+#
+filter_operator = set(['>', '<', '==', '>=', '<=', '!='])
+
+#  Matches variable names
+#
+re_varname = re.compile(r'^\w+$')
+
 class Event(object):
 	"""
 	Handles event communication.
 
 	Event processing is established when a client connects to the event
-	socket and sends a registration message indicating which events
+	socket and sends a subscription message indicating which events
 	should be reported.  Processing is terminated when the client
 	closes the connection.
 
-	Events are reported using the registered event information and the
-	complete rainbarrel state.
+	Events are reported using the complete rainbarrel state and
+	the subscription filter blocks that matched the state.  The
+	resulting publication is a map with the form:
+
+	{
+	  "status": true|false,
+	  "error": "error message if status is false",
+	  "state": {current rainbarrel state},
+	  "blocks": [list of filter blocks that matched the state or triggered the error]
+	}
+
+	A subscription consists of a list of filter blocks.  A filter block is
+	a map which may individually match the state and cause the state to be
+	published.  A filter block has the form:
+
+	{
+	  "name": "user provided filter block name",
+	  "type": "edge"|"level" (default is "level"),
+	  "state": true|false,
+	  "filters": [filter_tuple [, filter_tuple, ...]]
+	}
+
+	"state" is the initial state for edge events.  The default will cause
+	an edge event to always trigger during the initial scan.  The state is
+	updated whenever an edge event is triggered.
+
+	All filter tuples in the list must all match the state for the filter
+	block to trigger a publication.  "OR" cases are handled with multiple
+	filter blocks.
+
+	A filter_tuple has the form:
+
+	  ( "state.path", comparator, value )
+
+	where:
+	  state.path	is a dotted path to a value entry in the state.
+			An example is "InstantaneousDemand._readings.Demand".
+	  comparator	is a string representation of a comparison operator.
+	  		Possible values are: "==", ">=", "<=", "!=", ">", "<".
+	  value		is any valid JSON value (string, number, Boolean) that
+	  		can be reasonably compared to the path value.
+
+	Note that although the individual filters can be writtent as Python tuples,
+	they are serialized by JSON as lists, so they when returned in the publication,
+	the "filters" element will arrive as a list of lists.
+
+	Example of a simple filter:
+
+	[
+	  { "name": "demand_exceeded", "filters": [["InstantaneousDemand._readings.Demand", ">", 1.5]] }
+	]
+
+	This references the rainbarrel-derived Demand value in the InstantaneousDemand "_readings" element.
+	Derived values tend to be a little easier to use because they are in consistent units (kW in this
+	case) instead of the integer encoded decimal values that come from the device.
 """
 
 	def __init__(self, event_set):
@@ -55,7 +116,7 @@ class Event(object):
 		self.registration_timeout = self.connection_time + max_registration_wait
 		self.shutting_down = None
 		self.discard = None
-		self.filter_list = None
+		self.subscription_list = None
 		self.event_set._pset.register(self, poll.POLLIN)
 		self.reader = netjson.Reader(self.sock, log=self.log)
 		self.writer = netjson.Writer(self.sock, log=self.log)
@@ -70,7 +131,7 @@ class Event(object):
 		if self.discard and time.time() > self.discard:
 			self.log.waring("Connection from %s exceeded shutdown wait, closing immediately", repr(self.client))
 			self.close()
-		if self.filter_list is not None:
+		if self.subscription_list is not None:
 			self.log.debug("Connection from %s idle", repr(self.client))
 			return
 		if self.registration_timeout and time.time() > self.registration_timeout:
@@ -82,9 +143,7 @@ class Event(object):
 
 	def shutdown(self):
 		if self.shutting_down:
-			self.log.warning("Close called %.1f secs after shutdown, immediate close triggered",
-						time.time() - self.shutting_down)
-			self.close()
+			self.log.info("Shutdown called again")
 		else:
 			self.shutting_down = time.time()
 			self.discard = self.shutting_down + max_discard_wait
@@ -111,7 +170,148 @@ class Event(object):
 			self.sock = None
 		self.event_set._events.discard(self)
 
-	def handle(self, mask):
+	def error(self, block, state, msg=None, exc=None):
+		if isinstance(block, dict):
+			if 'name' in block:
+				name = str(block['name'])
+			else:
+				name = 'unknown'
+		else:
+			name = 'invalid'
+		if exc:
+			self.log.error("Block %s error -- %s",
+						repr(name), str(exc), exc_info=self.log.isEnabledFor(logging.DEBUG))
+		else:
+			self.log.error("Block %s error -- %s", repr(name), str(msg))
+		self.writer.queue({
+			"status": False,
+			"state": state,
+			"blocks": [block]
+		})
+		self.event_set._pset.modify(self, poll.POLLIN|poll.POLLOUT)
+		self.shutdown()
+
+	def compile(self):
+		"""
+		Generate and compile the actual expressions needed
+		to execute the filter blocks.  This is done by
+		building a parallel tree of filters for the
+		subscription.  Any error encountered during
+		compilation causes the entire subscription to be
+		rejected.
+
+		Once built, the expressions should be executed via:
+
+			res = eval(expr, {}, {'state': state})
+			if res is not True and res is not False:
+				self.error(block, state, msg='filter expression did not return true/false')
+
+		This restricts the expression's access to just the
+		content of the state tree.
+	"""
+		if self.subscription_list is None or len(self.subscription_list) == 0:
+			self.log.warning("Filter called with no filter list recorded")
+			return
+		self.expression_list = []
+		for block in self.subscription_list:
+			if 'filters' not in block:
+				self.error(block, None, msg="Filter block provided has no 'filters' element")
+				return
+			try:
+				name = str(block.get('name'))
+				expression_block = []
+				for filter in block['filters']:
+					if len(filter) == 1:
+						#  A single string must be the name of a state command, eg 'InstantaneousDemand'
+						#
+						cmd = filter[0].strip()
+
+						#  Might like to validate these against the known list, eg in
+						#  barrel().properties.keys()
+						#
+						if re_varname.match(cmd) is None:
+							self.error(block, None, msg="Invalid state command name '%s'" % (cmd,))
+							return
+						code = compile("""state['_last_updated'] = '%s'""" % (cmd,), name, 'eval')
+					elif len(filter) == 3:
+						#  A three-tuple compares a state variable with a constant
+						#
+						path = filter[0].strip()
+						op = filter[1].strip()
+						val = filter[2]
+
+						f = path.split('.')
+						if len(f) == 0:
+							self.error(block, None, msg='Empty state path')
+							return
+						sv = 'state'
+						while len(f) > 0:
+							tag = str(f.pop(0))
+							if re_varname.match(tag) is None:
+								self.error(block, None, msg='Invalid path element "%s"' % (tag,))
+								return
+							sv += "['" + tag + "']"
+						if op not in filter_operators:
+							self.error(block, None, msg="Invalid filter operator '%s'" % (op,))
+							return
+						code = compile("""%s %s %s""" % (sv, op, repr(val)), name, 'eval')
+					else:
+						self.error(block, None, msg='Invalid filter length')
+						return
+					expression_block.append(code)
+			except Exception as e:
+				self.error(block, None, exc=e)
+				return
+
+		self.expression_list.append(expression_block)
+
+	def filter(self, state):
+		"""
+		Filters the current state to determine if the event
+		has fired.  If so, the state is queued to be send
+		to the client.
+
+		This method is called whenever the state is changed
+		by the Rainforest device.
+	"""
+		if self.subscription_list is None or len(self.subscription_list) == 0:
+			self.log.warning("Filter called with no filter list recorded")
+			return
+		self.log.info("Filter called")
+		matched_blocks = []
+		for block in self.subscription_list:
+			try:
+				if 'type' not in block:
+					block['type'] = 'level'
+				if block['type'] not in ['edge', 'level']:
+					raise Exception("Unknown filter block type '%s'" % (block['type'],))
+				if 'state' not in block:
+					block['state'] = None
+				self.log.debug("Checking %s filter block %s", block['type'], block.get('name'))
+				matched = True
+				for filter in block.filters:
+					if not self.test(filter, state):
+						matched = False
+						break
+				if block['type'] == 'edge':
+					if matched != block['state']:
+						block['state'] = matched
+						matched_blocks.append(block)
+				elif matched:
+					block['state'] = matched
+					matched_blocks.append(block)
+			except Exception as e:
+				self.error(block, state, exc=e)
+				return
+		if len(matched_blocks) > 0:
+			self.writer.queue({
+				"status": True,
+				"state": state,
+				"blocks": matched_blocks
+			})
+			self.event_set._pset.modify(self, poll.POLLIN|poll.POLLOUT)
+
+	def handle(self, mask, state):
 		"""
 		Handle poll() event.  This will read available data and/or
 		write pending data.  When all pending data has been written,
@@ -123,30 +323,21 @@ class Event(object):
 			for item in self.reader.recv():
 				items += 1
 				self.log.info("Received %s", repr(item))
-				self.filter_list = item
+				if items > 1:
+					self.log.warning("Multiple netstrings received, only last takes effect")
+				self.subscription_list = item
 			self.log.info("Received %d item%s in this batch", items, '' if items == 1 else 's')
 			if self.reader.connection_lost:
 				self.log.info("EOF on %s connection", repr(self.client))
 				self.close()
 			if items > 0:
-				self.writer.queue(item)
-				self.event_set._pset.modify(self, poll.POLLIN|poll.POLLOUT)
+				self.compile()
+				self.filter(state)
 
 		if mask & poll.POLLOUT:
 			self.writer.send()
 			if self.writer.queue() == 0:
 				self.event_set._pset.modify(self, poll.POLLIN)
-
-	def filter(self, state):
-		"""
-		Filters the current state to determine if the event
-		has fired.  If so, the state is queued to be send
-		to the client.
-
-		This method is called whenever the state is changed
-		by the Rainforest device.
-	"""
-		self.log.info("Filter called")
 
 class EventSet(object):
 	def __init__(self, pset, listen, **params):
@@ -177,10 +368,10 @@ class EventSet(object):
 		"""
 		Clear out all existing connections.  This should be
 		called after any disruption in processing, eg when the
-		parent restarts itself due following an unexpected
-		exception.  It is safe to call at any time but note
-		that existing connections are closed immediately without
-		following the shutdown protocol.
+		parent restarts itself following an unexpected exception.
+		It is safe to call at any time but note that existing
+		connections are closed immediately without following the
+		shutdown protocol.
 	"""
 		self.log.info("Reset all events")
 		for ev in list(self._events):
@@ -191,7 +382,8 @@ class EventSet(object):
 	def idle(self):
 		"""
 		Calls the idle() method on all recorded events.
-		This should be called by the
+		This should be called periodically when other
+		operations don't require processing.
 	"""
 		for ev in list(self._events):
 			ev.idle()
