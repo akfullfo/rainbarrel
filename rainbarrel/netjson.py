@@ -78,9 +78,9 @@ class Writer(object):
 			if self.log.isEnabledFor(logging.DEBUG):
 				pending = 0
 				for item in self.q:
-					pending += item.size - item.sofar
+					pending += item.remaining
 				self.log.debug("Queued %d bytes, pending items %d, pending bytes %d",
-					self.q[-1].size, len(self.q), pending)
+					self.q[-1].remaining, len(self.q), pending)
 		return len(self.q)
 
 	def send(self):
@@ -104,7 +104,7 @@ class Writer(object):
 		if self.log.isEnabledFor(logging.DEBUG):
 			pending = 0
 			for item in self.q:
-				pending += item.size - item.sofar
+				pending += item.remaining
 			self.log.debug("Pending items %d, pending bytes %d", len(self.q), pending)
 		return len(self.q)
 

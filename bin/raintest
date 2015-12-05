@@ -1,0 +1,133 @@
+#!/usr/bin/env python
+# ________________________________________________________________________
+#
+#  Copyright (C) 2015 Andrew Fullford
+#
+#  Licensed under the Apache License, Version 2.0 (the "License");
+#  you may not use this file except in compliance with the License.
+#  You may obtain a copy of the License at
+#
+#        http://www.apache.org/licenses/LICENSE-2.0
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
+# ________________________________________________________________________
+#
+ 
+import os, sys, time, socket, re, argparse, logging
+from logging.handlers import SysLogHandler
+from rainbarrel import netjson
+
+def_port = 1315
+def_address = 'localhost:' + str(def_port)
+
+__doc__ = """
+Example code that connects to a rainbarrel server, sets
+a simple filter, and then logs any matching events.
+
+The program exits if the server shuts down and on keyboard
+interrupt.
+"""
+
+def connect(addr, proto=socket.AF_INET):
+	if addr.find(':') >= 0:
+		host, portstr = addr.rsplit(':', 1)
+		port = int(portstr)
+	else:
+		host = addr
+		port = def_port
+
+	sock = socket.create_connection((host, port), 10)
+
+	#  Disable timeouts once connected.  Events can be very rare.
+	#
+	sock.settimeout(None)
+
+	return sock
+ 
+program = os.path.basename(os.path.splitext(sys.argv[0])[0])
+logging_name = program
+
+p = argparse.ArgumentParser(formatter_class=argparse.RawDescriptionHelpFormatter,
+	description='Track demand power from Rainforest "Eagle" smart meter monitoring device.')
+
+p.add_argument('-v', '--verbose', action='store_true', help='Verbose logging for debugging.')
+p.add_argument('-q', '--quiet', action='store_true', help='Quiet logging, warnings and errors only.')
+p.add_argument('-l', '--log-syslog', action='store_true', help='Log to stderr instead of syslog.')
+p.add_argument('-a', '--address', action='store', default=def_address,
+		help='Address of rainbarrel event service as host:port, default: '+def_address)
+p.add_argument('limit', action='store', type=float, help='Report when demand exceeds this value in kW')
+
+args = p.parse_args()
+
+if args.log_syslog:
+	logparams = {}
+	for addr in ['/dev/log', '/var/run/log']:
+		if os.path.exists(addr):
+			logparams['address'] = addr
+			break
+	log_handler = SysLogHandler(**logparams)
+	log_formatter = logging.Formatter(fmt="%(name)s[%(process)d]: %(levelname)s %(message).1000s")
+else:
+	log_handler = logging.StreamHandler()
+	log_formatter = logging.Formatter(fmt="%(asctime)s %(levelname)s %(message)s")
+
+log = logging.getLogger(logging_name)
+log_handler.setFormatter(log_formatter)
+log.addHandler(log_handler)
+
+if args.verbose:
+	log.setLevel(logging.DEBUG)
+elif args.quiet:
+	log.setLevel(logging.WARNING)
+else:
+	log.setLevel(logging.INFO)
+
+subscription = {
+	"name": "demand",
+	"filters": [('InstantaneousDemand._readings.Demand', '>=', args.limit,)]
+}
+
+try:
+	sock = connect(args.address)
+
+	reader = netjson.Reader(sock, log=log)
+	writer = netjson.Writer(sock, log=log)
+	writer.queue([subscription])
+	writer.send()
+except Exception as e:
+	log.error("Connection to %s failed -- %s", repr(args.address), str(e), exc_info=log.isEnabledFor(logging.DEBUG))
+	exit(2)
+
+log.info("Started")
+
+exiting = 0
+code = 0
+while not reader.connection_lost and exiting < 10:
+	try:
+		for event in reader.recv():
+			try:
+				demand = event['state']['InstantaneousDemand']['_readings']['Demand']
+				when = event['state']['_timestamp']
+				log.info("Demand %.1f kW above %.1f limit at %s", demand, args.limit, time.ctime(when))
+			except Exception as e:
+				log.error("Returned state had no demand reading")
+	except KeyboardInterrupt:
+		log.info("Exiting on interrupt")
+		if exiting == 0:
+			sock.shutdown(socket.SHUT_WR)
+		else:
+			log.info("Waiting for connection shutdown")
+		exiting += 1
+	except Exception as e:
+		log.error("Unhandled exception -- %s", str(e), exc_info=True)
+		code = 3
+		break
+
+try: sock.close()
+except: pass
+
+sys.exit(code)

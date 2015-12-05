@@ -34,7 +34,7 @@ max_discard_wait = 5
 
 #  The operators supported for use in filters
 #
-filter_operator = set(['>', '<', '==', '>=', '<=', '!='])
+filter_operators = set(['>', '<', '==', '>=', '<=', '!='])
 
 #  Matches variable names
 #
@@ -117,6 +117,7 @@ class Event(object):
 		self.shutting_down = None
 		self.discard = None
 		self.subscription_list = None
+		self.expression_list = None
 		self.event_set._pset.register(self, poll.POLLIN)
 		self.reader = netjson.Reader(self.sock, log=self.log)
 		self.writer = netjson.Writer(self.sock, log=self.log)
@@ -219,6 +220,16 @@ class Event(object):
 				return
 			try:
 				name = str(block.get('name'))
+				if 'type' not in block:
+					block['type'] = 'level'
+				if block['type'] not in ['edge', 'level']:
+					raise Exception("Unknown filter block type '%s'" % (subs_block['type'],))
+				if 'state' not in block:
+					block['state'] = None
+				if 'filters' not in block:
+					block['filters'] = []
+				if not isinstance(block['filters'], list):
+					block['filters'] = [block['filters']]
 				expression_block = []
 				for filter in block['filters']:
 					if len(filter) == 1:
@@ -232,7 +243,7 @@ class Event(object):
 						if re_varname.match(cmd) is None:
 							self.error(block, None, msg="Invalid state command name '%s'" % (cmd,))
 							return
-						code = compile("""state['_last_updated'] = '%s'""" % (cmd,), name, 'eval')
+						code = compile("""state['_last_updated'] == '%s'""" % (cmd,), name, 'eval')
 					elif len(filter) == 3:
 						#  A three-tuple compares a state variable with a constant
 						#
@@ -277,31 +288,33 @@ class Event(object):
 		if self.subscription_list is None or len(self.subscription_list) == 0:
 			self.log.warning("Filter called with no filter list recorded")
 			return
+		if self.expression_list is None:
+			raise Exception("Attempt to filter before subscription has been complied")
+
 		self.log.info("Filter called")
 		matched_blocks = []
-		for block in self.subscription_list:
+		for subs_pos in range(len(self.subscription_list)):
+			subs_block = self.subscription_list[subs_pos]
+			expr_block = self.expression_list[subs_pos]
 			try:
-				if 'type' not in block:
-					block['type'] = 'level'
-				if block['type'] not in ['edge', 'level']:
-					raise Exception("Unknown filter block type '%s'" % (block['type'],))
-				if 'state' not in block:
-					block['state'] = None
-				self.log.debug("Checking %s filter block %s", block['type'], block.get('name'))
+				self.log.debug("Checking %s filter block %s", subs_block['type'], subs_block.get('name'))
 				matched = True
-				for filter in block.filters:
-					if not self.test(filter, state):
+				for expr in expr_block:
+					res = eval(expr, {}, {'state': state})
+					if res is not True and res is not False:
+						raise Exception('filter expression did not return true/false')
+					if not res:
 						matched = False
 						break
-				if block['type'] == 'edge':
-					if matched != block['state']:
-						block['state'] = matched
-						matched_blocks.append(block)
+				if subs_block['type'] == 'edge':
+					if matched != subs_block['state']:
+						subs_block['state'] = matched
+						matched_blocks.append(subs_block)
 				elif matched:
-					block['state'] = matched
-					matched_blocks.append(block)
+					subs_block['state'] = matched
+					matched_blocks.append(subs_block)
 			except Exception as e:
-				self.error(block, state, exc=e)
+				self.error(subs_block, state, exc=e)
 				return
 		if len(matched_blocks) > 0:
 			self.writer.queue({
