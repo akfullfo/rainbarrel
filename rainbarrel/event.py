@@ -297,7 +297,8 @@ class Event(object):
 			subs_block = self.subscription_list[subs_pos]
 			expr_block = self.expression_list[subs_pos]
 			try:
-				self.log.debug("Checking %s filter block %s", subs_block['type'], subs_block.get('name'))
+				self.log.debug("Checking %s filter block %s", subs_block['type'],
+				repr(subs_block.get('name')))
 				matched = True
 				for expr in expr_block:
 					res = eval(expr, {}, {'state': state})
