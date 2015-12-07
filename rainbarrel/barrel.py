@@ -116,6 +116,7 @@ class Barrel(object):
 				self.authorized_addrs.append(netaddr.IPNetwork(addr))
 
 		self.plugins = self._import_plugins()
+		self.event_set = None
 
 	def iso8601(self, tim = time.time(), **params):
 		local = params.get('local', self.config.get('timestamp_local', True))
@@ -332,8 +333,8 @@ class Barrel(object):
 
 		resp = (200, '', 'text/plain')
 
+		now = time.time()
 		for node in dom.getElementsByTagName('rainforest'):
-			now = time.time()
 			header = {}
 			header['_version'] = node.getAttribute('version')
 			header['_mac'] = node.getAttribute('macId')
@@ -351,7 +352,7 @@ class Barrel(object):
 				self.log.warning("No timestamp in rainforest POST xml")
 
 			if node.nodeType != node.ELEMENT_NODE or not node.hasChildNodes():
-				self.log.warning("XML rainforest node had not children")
+				self.log.warning("XML rainforest node had no children")
 				continue
 			for command in node.childNodes:
 				if command.nodeType != command.ELEMENT_NODE:
@@ -389,8 +390,8 @@ class Barrel(object):
 				resp = self.check_schedule(info)
 				self.state[command.nodeName] = info
 				self.state['_last_element'] = command.nodeName
-				self.state['_last_update'] = now
 
+			self.state['_last_update'] = now
 			self.state['_timestamp'] = header['_timestamp']
 			for tag in ['_mac', '_version']:
 				if header[tag] != self.state.get(tag):
@@ -405,6 +406,8 @@ class Barrel(object):
 				self.log.error("Plugin '%s' failed for '%s' -- %s",
 							name, self.state['_last_element'], str(e), exc_info=True)
 		self.save_state()
+		if self.event_set is not None:
+			self.event_set.filter(self.state)
 		return resp
 
 	def event_listener(self, addr, proto=socket.AF_INET, queue=5):
@@ -458,32 +461,28 @@ class Barrel(object):
 			event_listen = None
 
 		try:
-			with event.EventSet(pset, event_listen) as es:
-				last_timestamp = None
+			with event.EventSet(pset, event_listen) as self.event_set:
 				while True:
 					evlist = pset.poll(poll_timeout)
-					if evlist:
+
+					if evlist is None:
+						event_cnt = 0
+					else:
+						event_cnt = len(evlist)
+					if event_cnt > 0:
+						self.log.debug("%d poll event%s received", event_cnt, '' if event_cnt == 1 else 's')
 						for item, mask in evlist:
 							if item == httpd_server:
 								item.handle_request()
 							elif item == event_listen:
-								es.add()
+								self.event_set.add()
 							elif isinstance(item, event.Event):
 								item.handle(mask, self.state)
 							else:
 								raise Exception("Unknown poll item %s", repr(item))
-
-						# After each event report any state change to the filters.
-						#
-						timestamp = self.state.get('_last_update')
-						if timestamp != last_timestamp:
-							last_timestamp = timestamp
-							es.filter(self.state)
-						else:
-							self.log.debug("Timestamp %s unchanged", timestamp)
 					else:
 						self.log.debug("Idle")
-						es.idle()
+						self.event_set.idle()
 		except Exception as e:
 			self.log.error("Unexpected event -- %s", str(e), exc_info=True)
 		finally:
