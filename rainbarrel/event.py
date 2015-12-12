@@ -291,7 +291,7 @@ class Event(object):
 		if self.expression_list is None:
 			raise Exception("Attempt to filter before subscription has been complied")
 
-		self.log.info("Filter called")
+		self.log.debug("Filter called")
 		matched_blocks = []
 		for subs_pos in range(len(self.subscription_list)):
 			subs_block = self.subscription_list[subs_pos]
@@ -331,21 +331,24 @@ class Event(object):
 		write pending data.  When all pending data has been written,
 		the POLLOUT is removed from the pset.
 	"""
-		self.log.info("Handle called")
+		self.log.debug("Handle called")
 		if mask & poll.POLLIN:
 			items = 0
 			for item in self.reader.recv():
 				items += 1
-				self.log.info("Received %s", repr(item))
+				self.log.debug("Received %s", repr(item))
 				if items > 1:
 					self.log.warning("Multiple netstrings received, only last takes effect")
 				self.subscription_list = item
-			self.log.info("Received %d item%s in this batch", items, '' if items == 1 else 's')
+			self.log.debug("Received %d item%s in this batch", items, '' if items == 1 else 's')
 			if self.reader.connection_lost:
 				self.log.info("EOF on %s connection", repr(self.client))
 				self.close()
 			if items > 0:
 				self.compile()
+				block_cnt = len(self.expression_list)
+				self.log.info("Successful subscription on fd %d with %d filter block%s",
+						self.fileno(), block_cnt, '' if block_cnt == 1 else 's')
 				self.filter(state)
 
 		if mask & poll.POLLOUT:
