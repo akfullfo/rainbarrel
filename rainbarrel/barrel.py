@@ -23,7 +23,8 @@ from datetime import datetime
 from dateutil import tz
 import plugin
 import event
-from taskforce import poll, httpd
+import httpd
+from taskforce import poll
 
 def_events_port = 1315
 
