@@ -243,7 +243,7 @@ class Event(object):
 						if re_varname.match(cmd) is None:
 							self.error(block, None, msg="Invalid state command name '%s'" % (cmd,))
 							return
-						expr = """state['_last_updated'] == '%s'""" % (cmd,)
+						expr = """state['_last_element'] == '%s'""" % (cmd,)
 					elif len(filter) == 3:
 						#  A three-tuple compares a state variable with a constant
 						#
@@ -268,7 +268,7 @@ class Event(object):
 						if op not in filter_operators:
 							self.error(block, None, msg="Invalid filter operator '%s'" % (op,))
 							return
-						expr = """state['_last_updated'] == '%s' and %s %s %s""" % (cmd, sv, op, repr(val))
+						expr = """state['_last_element'] == '%s' and %s %s %s""" % (cmd, sv, op, repr(val))
 					else:
 						self.error(block, None, msg='Invalid filter length')
 						return
@@ -301,14 +301,17 @@ class Event(object):
 			subs_block = self.subscription_list[subs_pos]
 			expr_block = self.expression_list[subs_pos]
 			try:
-				self.log.debug("Checking %s filter block %s", subs_block['type'],
-				repr(subs_block.get('name')))
+				self.log.debug("Checking %s filter block %s", subs_block['type'], repr(subs_block.get('name')))
 				matched = True
 				for expr in expr_block:
 					res = eval(expr, {}, {'state': state})
 					if res is not True and res is not False:
 						raise Exception('filter expression did not return true/false')
-					if not res:
+					if res:
+						self.log.debug("Block %s matched", repr(subs_block.get('name')))
+					else:
+						self.log.debug("Block %s NO match, last element changed was %s",
+									repr(subs_block.get('name')), repr(state['_last_element']))
 						matched = False
 						break
 				if subs_block['type'] == 'edge':
