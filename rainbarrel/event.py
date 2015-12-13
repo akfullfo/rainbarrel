@@ -243,7 +243,7 @@ class Event(object):
 						if re_varname.match(cmd) is None:
 							self.error(block, None, msg="Invalid state command name '%s'" % (cmd,))
 							return
-						code = compile("""state['_last_updated'] == '%s'""" % (cmd,), name, 'eval')
+						expr = """state['_last_updated'] == '%s'""" % (cmd,)
 					elif len(filter) == 3:
 						#  A three-tuple compares a state variable with a constant
 						#
@@ -256,8 +256,11 @@ class Event(object):
 							self.error(block, None, msg='Empty state path')
 							return
 						sv = 'state'
+						cmd = None
 						while len(f) > 0:
 							tag = str(f.pop(0))
+							if cmd is None:
+								cmd = tag
 							if re_varname.match(tag) is None:
 								self.error(block, None, msg='Invalid path element "%s"' % (tag,))
 								return
@@ -265,11 +268,12 @@ class Event(object):
 						if op not in filter_operators:
 							self.error(block, None, msg="Invalid filter operator '%s'" % (op,))
 							return
-						code = compile("""%s %s %s""" % (sv, op, repr(val)), name, 'eval')
+						expr = """state['_last_updated'] == '%s' and %s %s %s""" % (cmd, sv, op, repr(val))
 					else:
 						self.error(block, None, msg='Invalid filter length')
 						return
-					expression_block.append(code)
+					self.log.debug("Compiling: %s", expr)
+					expression_block.append(compile(expr, name, 'eval'))
 			except Exception as e:
 				self.error(block, None, exc=e)
 				return
