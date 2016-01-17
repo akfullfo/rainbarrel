@@ -20,7 +20,7 @@
 import os, time, errno, socket, json, re, logging
 import event
 import netjson
-from taskforce import poll
+from pollinator import poll
 
 #  How long a fresh connection will be retained waiting for a
 #  registration message.

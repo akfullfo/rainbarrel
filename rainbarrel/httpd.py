@@ -30,7 +30,7 @@ except:
 from .__init__ import __version__ as rainbarrel_version
 
 #  Default when no address is provided
-def_address = '/var/run/s.taskforce'
+def_address = '/var/run/s.rainbarrel'
 
 #  Used when a IP address is provided with no port
 def_port = 8080

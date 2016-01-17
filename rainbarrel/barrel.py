@@ -24,7 +24,7 @@ from dateutil import tz
 import plugin
 import event
 import httpd
-from taskforce import poll
+from pollinator import poll
 
 def_events_port = 1315
 
@@ -277,7 +277,7 @@ class Barrel(object):
 
 	def process(self, path, postmap, **params):
 		"""
-		Receives all POSTs from device via taskforce.httpd module.
+		Receives all POSTs from device via httpd module.
 		This queues updates to listening processes and runs each
 		plugin synchonously in order.  Both plugins and processes
 		receive the same data. Plugins are passed the data as a dict.
