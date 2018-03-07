@@ -366,15 +366,19 @@ class Barrel(object):
 					if elem.nodeType != elem.ELEMENT_NODE:
 						continue
 					tag = elem.nodeName
-					val = elem.childNodes[0].nodeValue.strip()
-					valstr = val
-					if self.is_hex.match(val):
-						try:
-							val = int(val, 0)
-							if val > 0x7FFFFFFF:
-								val -= 0x100000000
-						except:
-							pass
+					if elem.childNodes:
+						val = elem.childNodes[0].nodeValue.strip()
+						valstr = val
+						if self.is_hex.match(val):
+							try:
+								val = int(val, 0)
+								if val > 0x7FFFFFFF:
+									val -= 0x100000000
+							except:
+								pass
+					else:
+						val = ''
+						valstr = val
 					self.log.debug("%s %s = %s", command.nodeName, elem.nodeName, repr(val))
 					info[tag] = val
 					raw_info[tag] = valstr
