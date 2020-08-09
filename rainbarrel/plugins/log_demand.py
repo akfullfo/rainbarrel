@@ -16,56 +16,60 @@
 #  limitations under the License.
 # ________________________________________________________________________
 #
- 
+
 import os
 
-from ..plugin import *
+from ..plugin import Plugin, PluginError
+
 
 def record_data(barrel, tag, ts, value):
-	if not barrel.datadir:
-		return
-	iso_ts = barrel.iso8601(ts)
-	barrel.log.debug("%s: %.3f", tag, value)
-	fname = os.path.join(barrel.datadir, barrel.iso8601(ts, terse=False)[:10] + '.' + tag)
+    if not barrel.datadir:
+        return
+    iso_ts = barrel.iso8601(ts)
+    barrel.log.debug("%s: %.3f", tag, value)
+    fname = os.path.join(barrel.datadir, barrel.iso8601(ts, terse=False)[:10] + '.' + tag)
 
-	with open(fname, 'a') as f:
-		f.write("%s\t%.3f\n" % (iso_ts, value))
+    with open(fname, 'a') as f:
+        f.write("%s\t%.3f\n" % (iso_ts, value))
+
 
 class demand(Plugin):
-	def handle(self, barrel, **params):
-		last_updated_name = barrel.state.get('_last_element')
-		if not last_updated_name:
-			raise PluginError("No _last_element element in state")
-		if last_updated_name == 'InstantaneousDemand':
-			info = barrel.state.get(last_updated_name)
-			if not info:
-				raise PluginError("%s entry missing from state", last_updated_name)
-			record_data(barrel, 'demand', info['_timestamp'], info['_readings']['Demand'])
-		else:
-			barrel.log.debug("demand handler ignoring '%s'", last_updated_name)
+    def handle(self, barrel, **params):
+        last_updated_name = barrel.state.get('_last_element')
+        if not last_updated_name:
+            raise PluginError("No _last_element element in state")
+        if last_updated_name == 'InstantaneousDemand':
+            info = barrel.state.get(last_updated_name)
+            if not info:
+                raise PluginError("%s entry missing from state", last_updated_name)
+            record_data(barrel, 'demand', info['_timestamp'], info['_readings']['Demand'])
+        else:
+            barrel.log.debug("demand handler ignoring '%s'", last_updated_name)
+
 
 class delivered(Plugin):
-	def handle(self, barrel, **params):
-		last_updated_name = barrel.state.get('_last_element')
-		if not last_updated_name:
-			raise PluginError("No _last_element element in state")
-		if last_updated_name == 'CurrentSummationDelivered':
-			info = barrel.state.get(last_updated_name)
-			if not info:
-				raise PluginError("%s entry missing from state", last_updated_name)
-			record_data(barrel, 'delivered', info['_timestamp'], info['_readings']['SummationDelivered'])
-		else:
-			barrel.log.debug("summation handler ignoring '%s'", last_updated_name)
+    def handle(self, barrel, **params):
+        last_updated_name = barrel.state.get('_last_element')
+        if not last_updated_name:
+            raise PluginError("No _last_element element in state")
+        if last_updated_name == 'CurrentSummationDelivered':
+            info = barrel.state.get(last_updated_name)
+            if not info:
+                raise PluginError("%s entry missing from state", last_updated_name)
+            record_data(barrel, 'delivered', info['_timestamp'], info['_readings']['SummationDelivered'])
+        else:
+            barrel.log.debug("summation handler ignoring '%s'", last_updated_name)
+
 
 class received(Plugin):
-	def handle(self, barrel, **params):
-		last_updated_name = barrel.state.get('_last_element')
-		if not last_updated_name:
-			raise PluginError("No _last_element element in state")
-		if last_updated_name == 'CurrentSummationDelivered':
-			info = barrel.state.get(last_updated_name)
-			if not info:
-				raise PluginError("%s entry missing from state", last_updated_name)
-			record_data(barrel, 'received', info['_timestamp'], info['_readings']['SummationReceived'])
-		else:
-			barrel.log.debug("summation handler ignoring '%s'", last_updated_name)
+    def handle(self, barrel, **params):
+        last_updated_name = barrel.state.get('_last_element')
+        if not last_updated_name:
+            raise PluginError("No _last_element element in state")
+        if last_updated_name == 'CurrentSummationDelivered':
+            info = barrel.state.get(last_updated_name)
+            if not info:
+                raise PluginError("%s entry missing from state", last_updated_name)
+            record_data(barrel, 'received', info['_timestamp'], info['_readings']['SummationReceived'])
+        else:
+            barrel.log.debug("summation handler ignoring '%s'", last_updated_name)
