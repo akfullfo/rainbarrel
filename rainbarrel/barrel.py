@@ -386,8 +386,6 @@ class Barrel(object):
                         if self.is_hex.match(val):
                             try:
                                 val = int(val, 0)
-                                if val > 0x7FFFFFFF:
-                                    val -= 0x100000000
                             except:
                                 pass
                     else:
