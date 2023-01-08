@@ -39,6 +39,8 @@ def_events_port = 1315
 #  Polling timeout in milliseconds
 poll_timeout = 3000
 
+LL_PAYLOAD = logging.DEBUG
+
 
 class Barrel(object):
 
@@ -340,11 +342,13 @@ class Barrel(object):
             for line in str(payload).splitlines():
                 self.log.error("  ] %s", line)
             return
-        self.log.debug("Payload parsed successfully ...")
-        for line in dom.toprettyxml(indent="  ").splitlines():
-            line = line.rstrip()
-            if line:
-                self.log.debug("  ] %s", line)
+
+        if self.log.isEnabledFor(LL_PAYLOAD):
+            self.log.log(LL_PAYLOAD, "Payload parsed successfully ...")
+            for line in dom.toprettyxml(indent="  ").splitlines():
+                line = line.rstrip()
+                if line:
+                    self.log.log(LL_PAYLOAD, "  ] %s", line)
 
         resp = (200, '', 'text/plain')
 
