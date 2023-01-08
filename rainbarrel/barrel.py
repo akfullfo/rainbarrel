@@ -29,9 +29,12 @@ import inspect
 import xml.dom.minidom
 from datetime import datetime
 from dateutil import tz
-import plugin
-import event
-import httpd
+try:
+    from . import plugin, event, httpd
+except ImportError:
+    import plugin
+    import event
+    import httpd
 from pollinator import poll
 
 def_events_port = 1315

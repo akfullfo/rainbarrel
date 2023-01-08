@@ -22,8 +22,11 @@ import errno
 import socket
 import re
 import logging
-import netjson
 from pollinator import poll
+try:
+    from . import netjson
+except ImportError:
+    import netjson
 
 #  How long a fresh connection will be retained waiting for a
 #  registration message.
